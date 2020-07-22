@@ -479,6 +479,7 @@ class LiquidacionesController extends AppController {
 		$this->set('types', $this->Liquidacion->opciones['tipo']);
 	}
 
+
 /**
  * PreLiquidar.
  * Me permite hacer una preliquidacion.
@@ -905,18 +906,23 @@ class LiquidacionesController extends AppController {
 */
     function generar_archivo_siap() {
 
-        if (!empty($this->data['Formulario']['accion']) && $this->data['Formulario']['accion'] === 'generar' && !empty($this->data['Condicion']['Bar-version'])) {
-            if (empty($this->data['Condicion']['Bar-periodo_largo']) || !preg_match('/^(20\d\d)(0[1-9]|1[012])$/', $this->data['Condicion']['Bar-periodo_largo'])) {
-                $this->Session->setFlash('Debe especificar un periodo valido de la forma AAAAMM.', 'error');
+        if (!empty($this->data['Formulario']['accion']) && ($this->data['Formulario']['accion'] === 'generar' || $this->data['Formulario']['accion'] === 'asignar') && !empty($this->data['Condicion']['Bar-version'])) {
+
+            if (empty($this->data['Condicion']['Bar-periodo_largo'])) {
+                return $this->Session->setFlash('Debe especificar un periodo valido de la forma AAAAMM.', 'error');
+            } else if (!isset($this->data['Condicion']['Bar-numero'])) {
+                return $this->Session->setFlash('Debe ingresar el número de liquidación.', 'error');
+            } else if (empty($this->data['Condicion']['Bar-empleador_id'])) {
+                return $this->Session->setFlash('Debe seleccionar el empleador.', 'error');
             } else {
                 $periodo = $this->Util->format($this->data['Condicion']['Bar-periodo_largo'], 'periodo');
-
                 $conditions = array('Liquidacion.estado'        => 'Confirmada',
+                                    'Liquidacion.tipo'           => $this->data['Condicion']['Liquidacion-tipo'],
                                     'Liquidacion.ano'           => $periodo['ano'],
-                                    'OR'						=> array(
-										'Liquidacion.mes'	=> $periodo['mes'],
-										array(	'Liquidacion.mes'	=> 0,
-												'Liquidacion.tipo'	=> 'Final')));
+                                    'Liquidacion.mes'	        => $periodo['mes']);
+                if (!empty($periodo['periodo'])) {
+                    $conditions['Liquidacion.periodo'] = $periodo['periodo'];
+                }
 
                 if (!empty($this->data['Condicion']['Bar-empleador_id'])) {
                     $conditions['Liquidacion.empleador_id'] = $this->data['Condicion']['Bar-empleador_id'];
@@ -926,6 +932,16 @@ class LiquidacionesController extends AppController {
                     $contain = array();
                 }
                 $conditions['(Liquidacion.group_id & ' . $this->data['Condicion']['Bar-grupo_id'] . ') >'] = 0;
+
+
+                if ($this->data['Formulario']['accion'] === 'asignar') {
+					if ($this->Liquidacion->updateAll(array('numero'=> $this->data['Condicion']['Bar-numero']), $conditions)) {
+                        return $this->Session->setFlash('Se asignó correctamente el número de liquidación', 'ok');
+                    } else {
+                        return $this->Session->setFlash('No fué posible asignar el número de liquidación.', 'error');
+                    }
+
+                }
 
                 $r = ClassRegistry::init('AusenciasSeguimiento')->find('all', array(
                     'contain'       => array('Liquidacion', 'Ausencia' => array('order' => 'Ausencia.desde')),
@@ -946,14 +962,15 @@ class LiquidacionesController extends AppController {
                 App::import('Vendor', 'dates', 'pragmatia');
                 $remuneraciones = null;
                 $compone = null;
-                $vantidadSueldo = $cantidadHorasExtras = null;
+                $cantidadSueldo = $cantidadHorasExtras = $dias = $horas = null;
+
                 $step = 0;
                 do {
                     $r = $this->Liquidacion->find('all',
                             array(  'checkSecurity' => false,
                                     'limit' => $step . ',' . 100,
                                     'contain'       => array_merge($contain, array(
-                                            'LiquidacionesDetalle' => array('conditions' => array('OR' => array('LiquidacionesDetalle.concepto_imprimir' => 'Si', array('LiquidacionesDetalle.concepto_imprimir' => 'Solo con valor', 'ABS(LiquidacionesDetalle.valor) >' => 0)))),
+                                            'LiquidacionesDetalle' => array('Concepto', 'conditions' => array('OR' => array('LiquidacionesDetalle.concepto_imprimir' => 'Si', array('LiquidacionesDetalle.concepto_imprimir' => 'Solo con valor', 'ABS(LiquidacionesDetalle.valor) >' => 0)))),
                                             'Relacion'      => array(
                                                 'RelacionesHistorial' => array(
                                                     'limit'         => 1,
@@ -962,7 +979,7 @@ class LiquidacionesController extends AppController {
                                                     'order'         => 'RelacionesHistorial.id DESC'),
                                                 'Actividad',
                                                 'Situacion',
-                                                'ConveniosCategoria',
+                                                'ConveniosCategoria' => array('Convenio'),
                                                 'Modalidad'),
                                             'Trabajador'    => array('ObrasSocial', 'Condicion', 'Siniestrado', 'Localidad'))),
                                     'conditions'    => $conditions));
@@ -988,8 +1005,11 @@ class LiquidacionesController extends AppController {
                         /** Inicialize arrays */
                         if (!isset($remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']])) {
 
+                            $bruto[$liquidacion['Liquidacion']['trabajador_cuil']] = 0;
                             $cantidadHorasExtras[$liquidacion['Liquidacion']['trabajador_cuil']] = 0;
 							$cantidadSueldo[$liquidacion['Liquidacion']['trabajador_cuil']] = 0;
+							$horas[$liquidacion['Liquidacion']['trabajador_cuil']] = 0;
+							$dias[$liquidacion['Liquidacion']['trabajador_cuil']] = 0;
 
                             foreach ($opcionesConcepto['remuneracion'] as $k => $v) {
                                 $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']][$v] = 0;
@@ -999,8 +1019,16 @@ class LiquidacionesController extends AppController {
                                 $compone[$liquidacion['Liquidacion']['trabajador_cuil']][$k] = 0;
                             }
                         }
+                        $bruto[$liquidacion['Liquidacion']['trabajador_cuil']] += $liquidacion['Liquidacion']['remunerativo'];
+                        $bruto[$liquidacion['Liquidacion']['trabajador_cuil']] += $liquidacion['Liquidacion']['no_remunerativo'];
 
                         foreach ($liquidacion['LiquidacionesDetalle'] as $detalle) {
+                            if ($detalle['concepto_codigo'] == 'horas') {
+                                $horas[$liquidacion['Liquidacion']['trabajador_cuil']] = $detalle['valor_cantidad'];
+                            }
+                            if ($detalle['concepto_codigo'] == 'sueldo_basico') {
+                                $dias[$liquidacion['Liquidacion']['trabajador_cuil']] = $detalle['valor_cantidad'];
+                            }
                             if (!empty($detalle['concepto_compone'])) {
                                 $compone[$liquidacion['Liquidacion']['trabajador_cuil']][$detalle['concepto_compone']] += $detalle['valor'];
 
@@ -1014,7 +1042,7 @@ class LiquidacionesController extends AppController {
                             }
                             if (!empty($detalle['concepto_remuneracion'])) {
                                 foreach ($opcionesConcepto['remuneracion'] as $k => $v) {
-                                    if ($detalle['concepto_remuneracion'] & (int)$k) {
+                                    if ($detalle['Concepto']['remuneracion'] & (int)$k) {
                                         $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']][$v] += $detalle['valor'];
                                     }
                                 }
@@ -1029,206 +1057,406 @@ class LiquidacionesController extends AppController {
                                 $liquidaciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Liquidacion'][$total] += $liquidacion['Liquidacion'][$total];
                             }
                         }
-                    }
-
-                    $lineas = null;
-                    foreach ($liquidaciones as $liquidacion) {
-
-                        if ($liquidacion['Liquidacion']['no_remunerativo'] < 0) {
-                            $liquidacion['Liquidacion']['no_remunerativo'] = '0';
-                        }
-
-                        $campos = $detalles;
-                        $campos['c1']['valor'] = str_replace('-', '', $liquidacion['Trabajador']['cuil']);
-                        $campos['c2']['valor'] = $liquidacion['Trabajador']['apellido'] . ' ' . $liquidacion['Trabajador']['nombre'];
-
-                        if (!empty($liquidacion['Relacion']['situacion_id'])) {
-                            $campos['c5']['valor'] = $liquidacion['Relacion']['Situacion']['codigo'];
-                        }
-                        if (!empty($liquidacion['Trabajador']['condicion_id'])) {
-                            $campos['c6']['valor'] = $liquidacion['Trabajador']['Condicion']['codigo'];
-                        }
-                        $campos['c7']['valor'] = $liquidacion['Relacion']['Actividad']['codigo'];
-                        $campos['c8']['valor'] = $liquidacion['Trabajador']['Localidad']['codigo_zona'];
-
-                        if (!empty($liquidacion['Relacion']['modalidad_id'])) {
-                            $campos['c10']['valor'] = $liquidacion['Relacion']['Modalidad']['codigo'];
-                        }
-                        if (!empty($liquidacion['Trabajador']['obra_social_id'])) {
-                            $campos['c11']['valor'] = $liquidacion['Trabajador']['ObrasSocial']['codigo'];
-                        }
-                        $campos['c12']['valor'] = $liquidacion['Trabajador']['adherentes_os'];
-
-                        $campos['c13']['valor'] = array_sum($compone[$liquidacion['Liquidacion']['trabajador_cuil']]) + $liquidacion['Liquidacion']['no_remunerativo'];
-
-                        $campos['c14']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 1'];
-                        $campos['c20']['valor'] = $liquidacion['Trabajador']['Localidad']['nombre'];
-                        $campos['c21']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 2'];
-                        $campos['c22']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 3'];
-
-                        $campos['c23']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 4'];
-
-                        if (!empty($liquidacion['Trabajador']['siniestrado_id'])) {
-                            $campos['c24']['valor'] = $liquidacion['Trabajador']['Siniestrado']['codigo'];
-                        }
-
-                        if (!empty($this->data['Condicion']['Bar-empleador_id'])) {
-                            if ($liquidacion['Empleador']['corresponde_reduccion'] === 'Si') {
-                                $campos['c25']['valor'] = 'S';
-                            } else {
-                                $campos['c25']['valor'] = ' ';
-                            }
-                        } else {
-                            $campos['c25']['valor'] = $groupParams['siap_corresponde_reduccion'];
-                        }
-
-                        if (!empty($this->data['Condicion']['Bar-empleador_id'])) {
-                            $campos['c27']['valor'] = $liquidacion['Empleador']['EmployersType']['code'];
-                        } else {
-                            $campos['c27']['valor'] = $groupParams['siap_tipo_empleador'];
-                        }
-
-                        if ($liquidacion['Trabajador']['jubilacion'] === 'Reparto') {
-                            $campos['c29']['valor'] = '1';
-                        } else {
-                            $campos['c29']['valor'] = '0';
-                        }
 
 
-                        $camposTmp = null;
-                        $camposTmp[0]['situacion'] = '1';
-                        $camposTmp[0]['dia'] = '01';
-                        $camposTmp[1]['situacion'] = '0';
-                        $camposTmp[1]['dia'] = '00';
-                        $camposTmp[2]['situacion'] = '0';
-                        $camposTmp[2]['dia'] = '00';
-                        $previous = null;
-                        $diasRevista = 0;
-                        $c = 0;
-                        if (!empty($ausencias[$liquidacion['Liquidacion']['trabajador_cuil']])) {
-                            $fin = 0;
-                            foreach ($ausencias[$liquidacion['Liquidacion']['trabajador_cuil']] as $k => $ausencia) {
-                                if ($ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo'] != '1') {
-                                    if ($ausencia['Ausencia']['desde'] <= $periodo['desde']) {
-                                        unset($camposTmp[0]);
-                                    }
+                        // search prev
+                        $prevLiquidaciones = $this->Liquidacion->find('all',
+                                array(  'checkSecurity' => false,
+                                        'contain'       => array('LiquidacionesDetalle' => array('Concepto', 'conditions' => array('OR' => array('LiquidacionesDetalle.concepto_imprimir' => 'Si', array('LiquidacionesDetalle.concepto_imprimir' => 'Solo con valor', 'ABS(LiquidacionesDetalle.valor) >' => 0))))),
+                                        'conditions'    => array(
+                                            'Liquidacion.ano'           => $periodo['ano'],
+                                            'Liquidacion.mes'	        => $periodo['mes'],
+                                            'Liquidacion.trabajador_cuil' => $liquidacion['Liquidacion']['trabajador_cuil'],
+                                            'Liquidacion.numero' => explode(',', $this->data['Condicion']['Bar-numero']))
+                        ));
 
-                                    if ($previous !== $ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo']) {
-                                        $previous = $ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo'];
-                                        $camposTmp[$c]['situacion'] = $ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo'];
+                        foreach ($prevLiquidaciones as $prevLiquidacion) {
+                            $bruto[$prevLiquidacion['Liquidacion']['trabajador_cuil']] += $prevLiquidacion['Liquidacion']['remunerativo'];
+                            $bruto[$prevLiquidacion['Liquidacion']['trabajador_cuil']] += $prevLiquidacion['Liquidacion']['no_remunerativo'];
 
-                                        if ($ausencia['Ausencia']['desde'] > $periodo['desde']) {
-                                            $camposTmp[$c]['dia'] = array_pop(explode('-', $ausencia['Ausencia']['desde']));
-                                        } else  {
-                                            $camposTmp[$c]['dia'] = array_pop(explode('-', $periodo['desde']));
+                            foreach ($prevLiquidacion['LiquidacionesDetalle'] as $prevDetalle) {
+                                if (!empty($prevDetalle['concepto_remuneracion'])) {
+                                    foreach ($opcionesConcepto['remuneracion'] as $k => $v) {
+                                        if ($prevDetalle['Concepto']['remuneracion'] & (int)$k) {
+                                            $remuneraciones[$prevLiquidacion['Liquidacion']['trabajador_cuil']][$v] += $prevDetalle['valor'];
                                         }
-
-                                        if ($ausencia['AusenciasSeguimiento']['estado'] == 'Liquidado') {
-                                            $fin += $ausencia['AusenciasSeguimiento']['dias'];
-                                        }
-                                        $diasRevista += $fin;
-
-                                        if (!empty($ausencias[$liquidacion['Liquidacion']['trabajador_cuil']][$k+1]['desde'])) {
-                                            $tmpNuevoInicio = array_pop(explode('-', $ausencias[$liquidacion['Liquidacion']['trabajador_cuil']][$k+1]['desde']));
-                                            if ($tmpNuevoInicio == ($camposTmp[$c]['dia'] + $fin)) {
-                                                continue;
-                                            }
-                                        }
-                                        $c++;
-                                        $camposTmp[$c]['situacion'] = '1';
-                                        $camposTmp[$c]['dia'] = $camposTmp[($c-1)]['dia'] + $fin;
                                     }
                                 }
                             }
                         }
+                    }
 
-                        ksort($camposTmp);
-                        $campoNumero = 30;
-                        foreach ($camposTmp as $k => $tmp) {
-                            if ($k > 2) {
-                                break;
+                    foreach ($bruto as $k => $v) {
+                        $bruto[$k] = $this->Util->format($v, array('type' => 'number', 'decimals' => ''));
+                    }
+
+                    foreach ($remuneraciones as $cuit => $remuneracion) {
+                        foreach ($remuneracion as $k => $v) {
+                            $remuneraciones[$cuit][$k] = $this->Util->format($v, array('type' => 'numero', 'decimals' => ''));
+                            if ($remuneraciones[$cuit][$k] - $bruto[$cuit] == 1) {
+                                $remuneraciones[$cuit][$k] = $bruto[$cuit];
                             }
-                            $campoNumero += ($k * 2);
-                            $campos['c' . $campoNumero]['valor'] = $tmp['situacion'];
-                            $campos['c' . ($campoNumero + 1)]['valor'] = $tmp['dia'];
-                            if ($tmp['situacion'] != '0') {
-                                $campos['c5']['valor'] = $tmp['situacion'];
+
+                        }
+                    }
+
+
+
+                    $lineas = null;
+                    foreach ($liquidaciones as $liquidacion) {
+                        $campos = $detalles;
+
+                        if ($data['Siap']['tipo'] == 'Libro Sueldo Digital') {
+
+                            if (empty($lineas['r1'])) {
+                                $campos['r1c1']['valor'] = '1'; //Identificador de registro
+                                $campos['r1c2']['valor'] = str_replace('-', '', $liquidacion['Liquidacion']['empleador_cuit']); //CUIT
+                                // $campos['r1c3']['valor'] = 'SJ'; //Identificación del envío
+                                $campos['r1c4']['valor'] = $periodo['periodoCompleto']; //Período
+                                $campos['r1c5']['valor'] = 'M'; // TODO //Tipo liquidación
+                                $campos['r1c6']['valor'] = max(explode(',', $this->data['Condicion']['Bar-numero'])) + 1; //Número de liquidación
+                                $campos['r1c7']['valor'] = 30; // Días base
+                                $campos['r1c8']['valor'] = count($liquidaciones); // Cantidad Registros 04
+
+                                $tmp = array();
+                                foreach ($campos as $k => $campo) {
+                                    if (substr($k, 0, 2) == 'r1') {
+                                        $tmp[] =$campo;
+                                    }
+                                }
+                                $lineas['r1'][] = $this->__generarRegistro($tmp);
                             }
-                        }
 
-                        $campos['c36']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Sueldo'];
-                        $campos['c37']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['SAC'];
-                        $campos['c38']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Importe Horas Extras'];
-                        $campos['c39']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Plus Zona Desfavorable'];
-                        $campos['c40']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Vacaciones'];
+                            $campos['r2c1']['valor'] = '2'; //Identificador de registro
+                            $campos['r2c2']['valor'] = str_replace('-', '', $liquidacion['Liquidacion']['trabajador_cuil']); //CUIL
+                            $campos['r2c3']['valor'] = $liquidacion['Liquidacion']['relacion_legajo']; //Legajo
+                            $campos['r2c4']['valor'] = $liquidacion['Liquidacion']['relacion_area_id']; //TODO, area nombre //Dependencia de Revista
+                            $campos['r2c5']['valor'] = $liquidacion['Liquidacion']['trabajador_cbu']; //CBU
+                            // $campos['r2c6']['valor'] = 0; //TODO: ver liq final //Cant. de días para proporcionar el tope
+                            $campos['r2c7']['valor'] = str_replace('-', '', $liquidacion['Liquidacion']['pago']);
+                            // $campos['r2c8']['valor'] = ''; //TODO: ver Fecha de rúbrica //Fecha de rúbrica
+                            // $campos['r2c9']['valor'] = '1'; //TODO: ver Forma de pago //Forma de pago
 
-                        if ($liquidacion['Relacion']['ingreso'] > $periodo['desde']) {
-                            $from = $liquidacion['Relacion']['ingreso'];
-                        } else {
-                            $from = $periodo['desde'];
-                        }
+                            $tmp = array();
+                            foreach ($campos as $k => $campo) {
+                                if (substr($k, 0, 2) == 'r2') {
+                                    $tmp[] =$campo;
+                                }
+                            }
+                            $lineas['r2'][] = $this->__generarRegistro($tmp);
 
-                        if ($liquidacion['Relacion']['estado'] == 'Historica'
-							&& !empty($liquidacion['Relacion']['RelacionesHistorial'][0]['fin'])
-							&& $liquidacion['Relacion']['RelacionesHistorial'][0]['fin'] < $periodo['hasta']) {
+                            foreach ($liquidacion['LiquidacionesDetalle'] as $detalle) {
+                                $campos['r3c1']['valor'] = '3'; //Identificador de registro
+                                $campos['r3c2']['valor'] = str_replace('-', '', $liquidacion['Liquidacion']['trabajador_cuil']); //CUIL
+                                $campos['r3c3']['valor'] = $detalle['concepto_id']; // Código Concepto
+                                $campos['r3c4']['valor'] = str_replace('.', '', $detalle['valor_cantidad']); // Cantidad
+                                $campos['r3c5']['valor'] = ''; // Unidades
+                                $campos['r3c6']['valor'] = str_replace('.', '', $detalle['valor']); // Importe
+                                $campos['r3c7']['valor'] = ($detalle['concepto_tipo'] == 'Deduccion')?'D':'C'; // Débito Crédito
+                                $campos['r3c8']['valor'] = ''; // Período ajuste
 
-                            $to = $liquidacion['Relacion']['RelacionesHistorial'][0]['fin'];
-                        } else {
-                            $to = $periodo['hasta'];
-                        }
+                                $tmp = array();
+                                foreach ($campos as $k => $campo) {
+                                    if (substr($k, 0, 2) == 'r3') {
+                                        $tmp[] =$campo;
+                                    }
+                                }
+                                $lineas['r3'][] = $this->__generarRegistro($tmp);
+                            }
+
+                            $campos['r4c1']['valor'] = '4'; //Identificador de registro
+                            $campos['r4c2']['valor'] = str_replace('-', '', $liquidacion['Liquidacion']['trabajador_cuil']); //CUIL
+                            // $campos['r4c3']['valor'] = ''; //TODO ver conyugue // Cónyuge
+                            // $campos['r4c4']['valor'] = ''; // Cantidad de hijos
+                            $campos['r4c5']['valor'] = $liquidacion['Relacion']['ConveniosCategoria']['Convenio']['numero']=='0'?'0':'1'; // Marca CCT
+                            //$campos['r4c6']['valor'] = ''; // Marca SCVO
+                            // $campos['r4c7']['valor'] = ''; // Marca corresponde reducción
+                            $campos['r4c8']['valor'] = $liquidacion['Empleador']['EmployersType']['code']; // Tipo empresa
+                            // $campos['r4c9']['valor'] = ''; // Tipo de operación
+                            $campos['r4c10']['valor'] = $liquidacion['Relacion']['Situacion']['codigo']; // Código situación
+                            $campos['r4c11']['valor'] = $liquidacion['Trabajador']['Condicion']['codigo']; // Código condición
+                            $campos['r4c12']['valor'] = $liquidacion['Relacion']['Actividad']['codigo']; // Código actividad
+                            $campos['r4c13']['valor'] = $liquidacion['Relacion']['Modalidad']['codigo']; // Código modalidad contratación
+                            $campos['r4c14']['valor'] = $liquidacion['Trabajador']['Siniestrado']['codigo']; // Código siniestrado
+                            $campos['r4c15']['valor'] = $liquidacion['Trabajador']['Localidad']['codigo_zona']; // Código de Localidad
+                            $campos['r4c16']['valor'] = '1'; // Situación de Revista 1
+                            $campos['r4c17']['valor'] = '1'; // Día inicio Situación de Revista 1
+                            $campos['r4c18']['valor'] = '0'; // Situación de Revista 2
+                            $campos['r4c19']['valor'] = '0'; // Día inicio Situación de Revista 2
+                            $campos['r4c20']['valor'] = '0'; // Situación de Revista 3
+                            $campos['r4c21']['valor'] = '0'; // Día inicio Situación de Revista 3
+                            // $campos['r4c22']['valor'] = $liquidacion['Liquidacion']['convenio_categoria_jornada'] == 'Mensual'?$dias[$liquidacion['Liquidacion']['trabajador_cuil']]:0; // Cant. días trabajados
+                            $campos['r4c22']['valor'] = $liquidacion['Liquidacion']['convenio_categoria_jornada'] == 'Mensual'?30:0; // Cant. días trabajados
+                            $campos['r4c23']['valor'] = $liquidacion['Liquidacion']['convenio_categoria_jornada'] == 'Por Hora'?$horas[$liquidacion['Liquidacion']['trabajador_cuil']]:0; // Horas trabajadas
+                            // $campos['r4c24']['valor'] = ''; // Porcentaje aporte adicional SS
+                            $campos['r4c25']['valor'] = $liquidacion['Trabajador']['Condicion']['codigo'] == '5'?'500':'0'; // Contribución tarea diferencial
+                            $campos['r4c26']['valor'] = $liquidacion['Trabajador']['ObrasSocial']['codigo']; // Código Obra social
+                            $campos['r4c27']['valor'] = $liquidacion['Trabajador']['adherentes_os']; // Cantidad adherentes
+                            $campos['r4c28']['valor'] = str_replace('.', '', $liquidacion['Trabajador']['aporte_adicional_os']); // Aporte Adicional OS
+                            // $campos['r4c29']['valor'] = '0'; // Contribución Adicional OS
+                            // $campos['r4c30']['valor'] = '0'; // Base cálculo Diferencial Aportes OS y FSR
+                            // $campos['r4c31']['valor'] = '0'; // Base cálculo Diferencial OS y FSR
+                            // $campos['r4c32']['valor'] = '0'; // Base cálculo Diferencial LRT
+                            // $campos['r4c33']['valor'] = '0'; // Remuneración Maternidad ANSeS
+                            $campos['r4c34']['valor'] = $bruto[$liquidacion['Liquidacion']['trabajador_cuil']]; // Remuneración bruta
+                            $campos['r4c35']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 1']; // Base imponible 1
+                            $campos['r4c36']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 2']; // Base imponible 2
+                            $campos['r4c37']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 3']; // Base imponible 3
+                            $campos['r4c38']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 4']; // Base imponible 4
+                            $campos['r4c39']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 5']; // Base imponible 5
+                            $campos['r4c40']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 6']; // Base imponible 6
+                            $campos['r4c41']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 7']; // Base imponible 7
+                            $campos['r4c42']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 8']; // Base imponible 8
+                            $campos['r4c43']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 9']; // Base imponible 9
+                            // $campos['r4c44']['valor'] = ''; // Base para el cálculo diferencial de aporte de Seg. Social
+                            // $campos['r4c45']['valor'] = ''; // Base para el cálculo diferencial de contribuciones de Seg. Social
+                            $aDetraer = 7003.68 / 8 * floatval($liquidacion['Liquidacion']['relacion_horas']);
+                            $campos['r4c46']['valor'] = $this->Util->format(($remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 2'] / 100) - $aDetraer, array('type' => 'number', 'decimals' => '')); // Base imponible 10
+                            $campos['r4c47']['valor'] = str_replace('.', '', $aDetraer); // Importe a detraer
+
+                            $tmp = array();
+                            foreach ($campos as $k => $campo) {
+                                if (substr($k, 0, 2) == 'r4') {
+                                    $tmp[] =$campo;
+                                }
+                            }
+                            $lineas['r4'][] = $this->__generarRegistro($tmp);
 
 
- 						if ($liquidacion['Relacion']['ConveniosCategoria']['jornada'] == 'Por Hora') {
-							$campos['c41']['valor'] = 0;
-						} else {
-							$diff = Dates::dateDiff($from, $to);
-							$campos['c41']['valor'] = $diff['dias'] - $diasRevista;
-						}
+                            // opcional
+                            // $campos['r5c1']['valor'] = '5'; //Identificador de registro
+                            // $campos['r5c2']['valor'] = str_replace('-', '', $liquidacion['Liquidacion']['trabajador_cuil']); //CUIL
+                            // $campos['r5c3']['valor'] = ''; // Categoría profesional
+                            // $campos['r5c4']['valor'] = ''; // Puesto desempeñado
+                            // $campos['r5c5']['valor'] = ''; // Fecha de ingreso
+                            // $campos['r5c6']['valor'] = ''; // Fecha de egreso
+                            // $campos['r5c7']['valor'] = ''; // Remuneración
+                            // $campos['r5c8']['valor'] = str_replace('-', '', $liquidacion['Liquidacion']['empleador_cuit']); //CUIT
+
+                            // $tmp = array();
+                            // foreach ($campos as $k => $campo) {
+                            //     if (substr($k, 0, 2) == 'r4') {
+                            //         $tmp[] =$campo;
+                            //     }
+                            // }
+                            // $lineas['r5'][] = $this->__generarRegistro($tmp);
+
+							// $diff = Dates::dateDiff($from, $to);
+                            // $firstDayNextMonth = date('Y-m-d', strtotime('first day of -0 month'));
+                            // $firstDayNextMonth = date('Y-m-d', strtotime('first day of next month'));
+                            // d($firstDayNextMonth);
+
+                            // d($lineasFinales);
+                        } else if ($data['Siap']['tipo'] == 'Siap') {
 
 
-                        $campos['c42']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 5'];
-                        if ($liquidacion['Relacion']['ConveniosCategoria']['nombre'] === 'Fuera de convenio') {
-                            $campos['c43']['valor'] = '0';
-                        } else {
-                            $campos['c43']['valor'] = '1';
-                        }
-                        $campos['c44']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 6'];
-                        $campos['c46']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Adicionales'];
-                        $campos['c47']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Premios'];
-                        $campos['c48']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 8'];
-                        $campos['c49']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 7'];
+                            if ($liquidacion['Liquidacion']['no_remunerativo'] < 0) {
+                                $liquidacion['Liquidacion']['no_remunerativo'] = '0';
+                            }
 
-                        if ($compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Importe Horas Extras'] > 0) {
-                            if (round($cantidadHorasExtras[$liquidacion['Liquidacion']['trabajador_cuil']]) > 1) {
-                                $campos['c50']['valor'] = round($cantidadHorasExtras[$liquidacion['Liquidacion']['trabajador_cuil']]);
+                            $campos['c1']['valor'] = str_replace('-', '', $liquidacion['Trabajador']['cuil']);
+                            $campos['c2']['valor'] = $liquidacion['Trabajador']['apellido'] . ' ' . $liquidacion['Trabajador']['nombre'];
+
+                            if (!empty($liquidacion['Relacion']['situacion_id'])) {
+                                $campos['c5']['valor'] = $liquidacion['Relacion']['Situacion']['codigo'];
+                            }
+                            if (!empty($liquidacion['Trabajador']['condicion_id'])) {
+                                $campos['c6']['valor'] = $liquidacion['Trabajador']['Condicion']['codigo'];
+                            }
+                            $campos['c7']['valor'] = $liquidacion['Relacion']['Actividad']['codigo'];
+                            $campos['c8']['valor'] = $liquidacion['Trabajador']['Localidad']['codigo_zona'];
+
+                            if (!empty($liquidacion['Relacion']['modalidad_id'])) {
+                                $campos['c10']['valor'] = $liquidacion['Relacion']['Modalidad']['codigo'];
+                            }
+                            if (!empty($liquidacion['Trabajador']['obra_social_id'])) {
+                                $campos['c11']['valor'] = $liquidacion['Trabajador']['ObrasSocial']['codigo'];
+                            }
+                            $campos['c12']['valor'] = $liquidacion['Trabajador']['adherentes_os'];
+
+                            $campos['c13']['valor'] = array_sum($compone[$liquidacion['Liquidacion']['trabajador_cuil']]) + $liquidacion['Liquidacion']['no_remunerativo'];
+
+                            $campos['c14']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 1'];
+                            $campos['c20']['valor'] = $liquidacion['Trabajador']['Localidad']['nombre'];
+                            $campos['c21']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 2'];
+                            $campos['c22']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 3'];
+
+                            $campos['c23']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 4'];
+
+                            if (!empty($liquidacion['Trabajador']['siniestrado_id'])) {
+                                $campos['c24']['valor'] = $liquidacion['Trabajador']['Siniestrado']['codigo'];
+                            }
+
+                            if (!empty($this->data['Condicion']['Bar-empleador_id'])) {
+                                if ($liquidacion['Empleador']['corresponde_reduccion'] === 'Si') {
+                                    $campos['c25']['valor'] = 'S';
+                                } else {
+                                    $campos['c25']['valor'] = ' ';
+                                }
                             } else {
-                                $campos['c50']['valor'] = 1;
+                                $campos['c25']['valor'] = $groupParams['siap_corresponde_reduccion'];
                             }
+
+                            if (!empty($this->data['Condicion']['Bar-empleador_id'])) {
+                                $campos['c27']['valor'] = $liquidacion['Empleador']['EmployersType']['code'];
+                            } else {
+                                $campos['c27']['valor'] = $groupParams['siap_tipo_empleador'];
+                            }
+
+                            if ($liquidacion['Trabajador']['jubilacion'] === 'Reparto') {
+                                $campos['c29']['valor'] = '1';
+                            } else {
+                                $campos['c29']['valor'] = '0';
+                            }
+
+
+                            $camposTmp = null;
+                            $camposTmp[0]['situacion'] = '1';
+                            $camposTmp[0]['dia'] = '01';
+                            $camposTmp[1]['situacion'] = '0';
+                            $camposTmp[1]['dia'] = '00';
+                            $camposTmp[2]['situacion'] = '0';
+                            $camposTmp[2]['dia'] = '00';
+                            $previous = null;
+                            $diasRevista = 0;
+                            $c = 0;
+                            if (!empty($ausencias[$liquidacion['Liquidacion']['trabajador_cuil']])) {
+                                $fin = 0;
+                                foreach ($ausencias[$liquidacion['Liquidacion']['trabajador_cuil']] as $k => $ausencia) {
+                                    if ($ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo'] != '1') {
+                                        if ($ausencia['Ausencia']['desde'] <= $periodo['desde']) {
+                                            unset($camposTmp[0]);
+                                        }
+
+                                        if ($previous !== $ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo']) {
+                                            $previous = $ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo'];
+                                            $camposTmp[$c]['situacion'] = $ausenciasMotivo[$ausencia['Ausencia']['ausencia_motivo_id']]['codigo'];
+
+                                            if ($ausencia['Ausencia']['desde'] > $periodo['desde']) {
+                                                $camposTmp[$c]['dia'] = array_pop(explode('-', $ausencia['Ausencia']['desde']));
+                                            } else  {
+                                                $camposTmp[$c]['dia'] = array_pop(explode('-', $periodo['desde']));
+                                            }
+
+                                            if ($ausencia['AusenciasSeguimiento']['estado'] == 'Liquidado') {
+                                                $fin += $ausencia['AusenciasSeguimiento']['dias'];
+                                            }
+                                            $diasRevista += $fin;
+
+                                            if (!empty($ausencias[$liquidacion['Liquidacion']['trabajador_cuil']][$k+1]['desde'])) {
+                                                $tmpNuevoInicio = array_pop(explode('-', $ausencias[$liquidacion['Liquidacion']['trabajador_cuil']][$k+1]['desde']));
+                                                if ($tmpNuevoInicio == ($camposTmp[$c]['dia'] + $fin)) {
+                                                    continue;
+                                                }
+                                            }
+                                            $c++;
+                                            $camposTmp[$c]['situacion'] = '1';
+                                            $camposTmp[$c]['dia'] = $camposTmp[($c-1)]['dia'] + $fin;
+                                        }
+                                    }
+                                }
+                            }
+
+                            ksort($camposTmp);
+                            $campoNumero = 30;
+                            foreach ($camposTmp as $k => $tmp) {
+                                if ($k > 2) {
+                                    break;
+                                }
+                                $campoNumero += ($k * 2);
+                                $campos['c' . $campoNumero]['valor'] = $tmp['situacion'];
+                                $campos['c' . ($campoNumero + 1)]['valor'] = $tmp['dia'];
+                                if ($tmp['situacion'] != '0') {
+                                    $campos['c5']['valor'] = $tmp['situacion'];
+                                }
+                            }
+
+
+                            $campos['c36']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Sueldo'];
+                            $campos['c37']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['SAC'];
+                            $campos['c38']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Importe Horas Extras'];
+                            $campos['c39']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Plus Zona Desfavorable'];
+                            $campos['c40']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Vacaciones'];
+
+                            if ($liquidacion['Relacion']['ingreso'] > $periodo['desde']) {
+                                $from = $liquidacion['Relacion']['ingreso'];
+                            } else {
+                                $from = $periodo['desde'];
+                            }
+
+                            if ($liquidacion['Relacion']['estado'] == 'Historica'
+                                && !empty($liquidacion['Relacion']['RelacionesHistorial'][0]['fin'])
+                                && $liquidacion['Relacion']['RelacionesHistorial'][0]['fin'] < $periodo['hasta']) {
+
+                                $to = $liquidacion['Relacion']['RelacionesHistorial'][0]['fin'];
+                            } else {
+                                $to = $periodo['hasta'];
+                            }
+
+
+                            if ($liquidacion['Relacion']['ConveniosCategoria']['jornada'] == 'Por Hora') {
+                                $campos['c41']['valor'] = 0;
+                            } else {
+                                $diff = Dates::dateDiff($from, $to);
+                                $campos['c41']['valor'] = $diff['dias'] - $diasRevista;
+                            }
+
+
+                            $campos['c42']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 5'];
+                            if ($liquidacion['Relacion']['ConveniosCategoria']['nombre'] === 'Fuera de convenio') {
+                                $campos['c43']['valor'] = '0';
+                            } else {
+                                $campos['c43']['valor'] = '1';
+                            }
+                            $campos['c44']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 6'];
+                            $campos['c46']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Adicionales'];
+                            $campos['c47']['valor'] = $compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Premios'];
+                            $campos['c48']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 8'];
+                            $campos['c49']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 7'];
+
+                            if ($compone[$liquidacion['Liquidacion']['trabajador_cuil']]['Importe Horas Extras'] > 0) {
+                                if (round($cantidadHorasExtras[$liquidacion['Liquidacion']['trabajador_cuil']]) > 1) {
+                                    $campos['c50']['valor'] = round($cantidadHorasExtras[$liquidacion['Liquidacion']['trabajador_cuil']]);
+                                } else {
+                                    $campos['c50']['valor'] = 1;
+                                }
+                            }
+                            $campos['c51']['valor'] = $liquidacion['Liquidacion']['no_remunerativo'];
+                            $campos['c54']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 9'];
+
+                            if ($liquidacion['Relacion']['tarea_diferencial'] == 'Si') {
+                                $campos['c55']['valor'] = '2';
+                            }
+
+
+                            if ($liquidacion['Relacion']['ConveniosCategoria']['jornada'] == 'Por Hora') {
+                                $campos['c56']['valor'] = round($cantidadSueldo[$liquidacion['Liquidacion']['trabajador_cuil']]);
+                            } else {
+                                $campos['c56']['valor'] = 0;
+
+                            }
+
+                            $lineas[] = $this->__generarRegistro($campos);
                         }
-                        $campos['c51']['valor'] = $liquidacion['Liquidacion']['no_remunerativo'];
-						$campos['c54']['valor'] = $remuneraciones[$liquidacion['Liquidacion']['trabajador_cuil']]['Remuneracion 9'];
-
-						if ($liquidacion['Relacion']['tarea_diferencial'] == 'Si') {
-							$campos['c55']['valor'] = '2';
-						}
-
-
-						if ($liquidacion['Relacion']['ConveniosCategoria']['jornada'] == 'Por Hora') {
-							$campos['c56']['valor'] = round($cantidadSueldo[$liquidacion['Liquidacion']['trabajador_cuil']]);
-						} else {
-							$campos['c56']['valor'] = 0;
-
-						}
-
-                        $lineas[] = $this->__generarRegistro($campos);
                     }
                 } while (!empty($r));
             }
 
             if (!empty($lineas)) {
+
+                if ($data['Siap']['tipo'] == 'Libro Sueldo Digital') {
+                    $lineasFinales = [ ];
+                    foreach ($lineas as $tipos) {
+                        foreach ($tipos as $linea) {
+                            $lineasFinales[] = $linea;
+                        }
+                    }
+                    $lineas = $lineasFinales;
+                }
+
                 $this->set('archivo', array(
                     'contenido' => implode("\r\n", $lineas),
-                    'nombre'    => 'SICOSS_' . $periodo['ano'] . '-' . $periodo['mes'] . '.txt'));
+                    'nombre'    => ($data['Siap']['tipo'] == 'Siap'?'SICOSS_':'Libro_Sueldo_Digital_') . $periodo['ano'] . '-' . $periodo['mes'] . '.txt'));
                 $this->render('..' . DS . 'elements' . DS . 'txt', 'txt');
             } else {
                 $this->Session->setFlash('No se han encontrado liquidaciones confirmadas para el periodo seleccioando segun los criterios especificados.', 'error');
@@ -1259,9 +1487,9 @@ class LiquidacionesController extends AppController {
                 }
 
                 if ($campo['direccion_relleno'] === 'Derecha') {
-                    $t = str_pad($campo['valor'], $campo['longitud'], $campo['caracter_relleno'], STR_PAD_RIGHT);
+                    $t = str_pad($campo['valor'], $campo['longitud'], (strlen($campo['caracter_relleno'])>0?$campo['caracter_relleno']:' '), STR_PAD_RIGHT);
                 } elseif ($campo['direccion_relleno'] === 'Izquierda') {
-                    $t = str_pad($campo['valor'], $campo['longitud'], $campo['caracter_relleno'], STR_PAD_LEFT);
+                    $t = str_pad($campo['valor'], $campo['longitud'], (strlen($campo['caracter_relleno'])>0?$campo['caracter_relleno']:'0'), STR_PAD_LEFT);
                 } else {
                     $t = $campo['valor'];
                 }
